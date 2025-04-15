@@ -1,9 +1,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/mod.ts";
-import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 
-const env = config();
-const UPDATE_TOKEN = env.UPDATE_TOKEN;
-const WIPE_TOKEN = env.WIPE_TOKEN;
+const UPDATE_TOKEN = Deno.env.get("UPDATE_TOKEN")!;
+const WIPE_TOKEN = Deno.env.get("WIPE_TOKEN")!;
 
 const kv = await Deno.openKv();
 
