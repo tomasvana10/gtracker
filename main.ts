@@ -7,27 +7,21 @@ const WIPE_TOKEN = env.WIPE_TOKEN;
 
 const kv = await Deno.openKv();
 
-function validateUpdateToken(req: Request): boolean {
+function validateToken(req: Request, token: string): boolean {
   const authorization = req.headers.get("Authorization");
   if (!authorization) return false;
 
-  const [scheme, token] = authorization.split(" ");
-  return scheme === "Bearer" && token === UPDATE_TOKEN;
-}
-
-function validateWipeToken(req: Request): boolean {
-  const authorization = req.headers.get("Authorization");
-  if (!authorization) return false;
-
-  const [scheme, token] = authorization.split(" ");
-  return scheme === "Bearer" && token === WIPE_TOKEN;
+  const [scheme, providedToken] = authorization.split(" ");
+  return scheme === "Bearer" && providedToken === token;
 }
 
 serve(async req => {
   const { pathname } = new URL(req.url);
 
-  if (req.method === "POST" && pathname === "/api/update") {
-    if (!validateUpdateToken(req)) {
+  if (pathname === "/api/update") {
+    if (req.method !== "POST")
+      return new Response("Invalid Method", { status: 405 });
+    if (!validateToken(req, UPDATE_TOKEN)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -40,8 +34,10 @@ serve(async req => {
     return new Response("Updated", { status: 200 });
   }
 
-  if (req.method === "POST" && pathname === "/api/wipe") {
-    if (!validateWipeToken(req)) {
+  if (pathname === "/api/wipe") {
+    if (req.method !== "POST")
+      return new Response("Invalid Method", { status: 405 });
+    if (!validateToken(req, WIPE_TOKEN)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -63,7 +59,11 @@ serve(async req => {
     return new Response("Bad Request", { status: 400 });
   }
 
-  if (req.method === "GET" && pathname === "/api/records") {
+  if (pathname === "/api/records") {
+    if (req.method !== "GET") {
+      return new Response("Invalid Method", { status: 405 });
+    }
+
     const entries = kv.list({ prefix: ["records"] });
     const result: Record<string, number> = {};
 
