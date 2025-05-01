@@ -1,0 +1,14 @@
+{
+    "compilerOptions": {
+        "module": "None",
+        "moduleResolution": "node",
+        "removeComments": true,
+        "target": "ESNext",
+        "lib": ["ESNext"],
+        "skipLibCheck": true
+    },
+    "include": ["../headers/*.d.ts", "*.ts"],
+    "exclude": ["build/*"],
+    "outDir": "./",
+    "skipLibCheck": true
+}

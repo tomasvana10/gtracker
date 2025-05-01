@@ -1,0 +1,20 @@
+{
+  "mc.australiaemc.net": {
+    "echestGoldCount": 4164.1,
+    "declaredGoldStorages": [
+      {
+        "type": "barrel",
+        "coords": [
+          21271,
+          91,
+          6216
+        ],
+        "count": 62
+      }
+    ]
+  },
+  "verbose": false,
+  "pushCooldownDurationSeconds": 10,
+  "pullIntervalSeconds": 60,
+  "inGameNameMap": {}
+}
