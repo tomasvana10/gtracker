@@ -41,7 +41,7 @@ serve(async req => {
     if (!validateToken(req, WIPE_TOKEN))
       return new Response("Unauthorized", { status: 401 });
 
-    const { type, key } = await req.json();
+    const { type, serverIdentifier, keys } = await req.json();
 
     if (type === "all") {
       const entries = kv.list({ prefix: ["records"] });
@@ -49,9 +49,10 @@ serve(async req => {
       return new Response("All records wiped", { status: 200 });
     }
 
-    if (type === "single" && Array.isArray(key)) {
-      await kv.delete(["records", ...key]);
-      return new Response(`Record ${key.join("/")} deleted`, { status: 200 });
+    if (type === "multiple" && Array.isArray(keys)) {
+      const keysToDelete = keys.map((k) => ["records", serverIdentifier, k])
+      for (const k of keysToDelete) await kv.delete(k)
+      return new Response(`Keys: ${serverIdentifier}/${keys.join(",")} deleted`, { status: 200 });
     }
 
     return new Response("Bad Request", { status: 400 });

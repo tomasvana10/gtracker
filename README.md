@@ -15,9 +15,10 @@ A player's gold count consists of their ender chest and inventory, while other c
 3. Run `client/gtracker.js` as a service in JSMacros. If you are unsure how to use JSMacros, visit [its website](https://jsmacros.wagyourtail.xyz/).
 
 ## For developers
-### Modifying the code
-Download `typescript-main.zip` from the [JSMacros release](https://github.com/JsMacros/JsMacros/releases/tag/1.9.2). You may want to modify `client/tsconfig.json` to properly include these files.
 
+### Modifying the code
+
+Download `typescript-main.zip` from the [JSMacros release](https://github.com/JsMacros/JsMacros/releases/tag/1.9.2). You may want to modify `client/tsconfig.json` to properly include these files.
 
 ### API Reference
 
@@ -49,12 +50,13 @@ Download `typescript-main.zip` from the [JSMacros release](https://github.com/Js
 
 ```json
 {
-  "key": ["mc.hypixel.net", "4d3e986c-9695-4fa4-945c-ac00d101c524"],
-  "type": "single"
+  "type": "multiple",
+  "serverIdentifier": "mc.hypixel.net",
+  "keys": ["4d3e986c-9695-4fa4-945c-ac00d101c524"]
 }
 ```
 
-Replace `single` with `all` to wipe all entries from the record (a key is not required in this case).
+Replace `multiple` with `all` to wipe all entries from the record (only `type` is required in this case).
 
 <br>
 
