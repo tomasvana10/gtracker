@@ -7,14 +7,9 @@
  * containers (which must be declared) are a separate entity.
  */
 
-if (Player.getGameMode() === "creative") throw new Error("You cannot use this script in creative.");
-if (
-  World.getCurrentServerAddress()
-    .toString()
-    .match(/local:\w:[a-zA-Z0-9]{8,}/)
-)
-  throw new Error("You cannot use this script in singleplayer.");
 const DEBUG = false;
+
+const extractPosFromKeyStringRegex = /\[C@(\d+,\d+,\d+)\]/;
 
 const DENO_API = "https://gtracker.deno.dev/api/";
 const UUID_API = "https://sessionserver.mojang.com/session/minecraft/profile/";
@@ -33,10 +28,38 @@ const GOLD_WEIGHTINGS = Object.fromEntries(
     "raw_gold": 1,
     "gold_ingot": 1,
     "gold_nugget": 0.1,
-  }).map(([k, v]) => [`minecraft:${k}`, v])
+  }).map(([key, val]) => [`minecraft:${key}`, val])
 );
 const GOLD_LIKE = Object.keys(GOLD_WEIGHTINGS);
+const VALID_GOLD_STORAGES = ["barrel", "chest"].map((val) => `minecraft:${val}`);
+const DOCS = [
+  {
+    cmd: "config <key> [set <value> | reset]",
+    desc: "Set the value of or reset the given configuration key",
+  },
+  {
+    cmd: "config <key>",
+    desc: "Get or toggle the given configuration key.",
+  },
+  { cmd: "forcePush", desc: "Push your gold to the server, disregarding any cooldowns." },
+  {
+    cmd: "gstorage declare <x> <y> <z>",
+    desc: "Declare a gold storage, adding it on your client. It will be added to the server once you provide it with gold.",
+  },
+  { cmd: "gstorage renounce <x> <y> <z>", desc: "Remove a gold storage from the client and the server." },
+  { cmd: "pull", desc: "Get the most up-to-date gold records for your server's pool." },
+  {
+    cmd: "gstorage nickname <x> <y> <z> (<nickname> | null)",
+    desc: "Nickname a gold storage (purely client side). Provide 'null' to remove it.",
+  },
+  {
+    cmd: "push",
+    desc: "Push your gold to the server if a cooldown isn't active.",
+  },
+  { cmd: "sync", desc: "Synchronise gold storages between your client and the server." },
+].sort((a, b) => a.cmd.localeCompare(b.cmd));
 
+// util funcs for chest memory objects
 const mfuncs = {
   updateGold(inv: Inventory) {
     this.mainGoldCount = getGoldCount(inv);
@@ -44,14 +67,17 @@ const mfuncs = {
   },
 };
 type BaseChestMemory = { wasOpen: boolean; mainGoldCount: number; contGoldCount: number } & typeof mfuncs;
+// echest memory
 const ecm: BaseChestMemory = {
   wasOpen: false,
   mainGoldCount: 0,
   contGoldCount: 0,
   ...mfuncs,
 };
-const scm: BaseChestMemory & { wasSlotDropped: boolean; contPos: Pos } = {
+// shared container memory
+const scm: BaseChestMemory & { wasSlotDropped: boolean; contPos: Pos; wasNotDeclared: boolean } = {
   wasOpen: false,
+  wasNotDeclared: false,
   wasSlotDropped: false,
   mainGoldCount: 0,
   contGoldCount: 0,
@@ -69,28 +95,35 @@ let pushCooldown = 0;
 let currentAttackedBlock: BlockDataHelper = null;
 
 const CONFIG_DEFAULTS: {
-  echestGoldCount: number;
   verbose: boolean;
   pushCooldownDurationSeconds: number;
   pullIntervalSeconds: number;
   inGameNameMap: { [key: string]: string };
-  declaredGoldStorages: { type: "singleChest" | "barrel"; coords: [number, number, number]; count: number }[];
+  echestGoldCount: number;
+  declaredGoldStorages: {
+    [key: PosString]: { type: "singleChest" | "barrel"; count: number; nickname: null | string };
+  };
+  goldRecordEntryLimit: number;
 } = {
-  echestGoldCount: 0,
   verbose: false,
-  pushCooldownDurationSeconds: 20,
+  pushCooldownDurationSeconds: 10,
   pullIntervalSeconds: 60,
   inGameNameMap: {},
-  declaredGoldStorages: [],
+  echestGoldCount: 0,
+  declaredGoldStorages: {},
+  goldRecordEntryLimit: 5,
 };
 const CONFIG_WORLD_SPECIFIC = ["declaredGoldStorages", "echestGoldCount"] as const;
 
 type ConfigDefaults = typeof CONFIG_DEFAULTS;
 type ConfigWorldSpecificValue = (typeof CONFIG_WORLD_SPECIFIC)[number];
-type ConfigShape = Omit<ConfigDefaults, ConfigWorldSpecificValue> & {
+type GenericConfigShape = Omit<ConfigDefaults, ConfigWorldSpecificValue>;
+type WorldConfigShape = {
   [worldIdentifier: string]: { [P in ConfigWorldSpecificValue]: ConfigDefaults[P] };
 };
 type Pos = [number, number, number];
+type PosString = `${number},${number},${number}`;
+type ConfigShape = GenericConfigShape | WorldConfigShape;
 
 const COLOURS = {
   gold: 0xcc990e,
@@ -98,102 +131,160 @@ const COLOURS = {
 };
 
 class FileSys {
-  static readData = <T = ConfigShape>(retry = true): T => {
+  static JSON_DIR = "json";
+  static GENERIC_CONFIG_FILENAME = "config.json";
+  static WORLD_CONFIG_FILENAME = "worlds.json";
+
+  static readData = <T extends ConfigShape>(generic: boolean, retry = true): T => {
     try {
-      return JSON.parse(FS.open("gtracker.json").read());
+      return JSON.parse(FS.open(filename(generic)).read());
     } catch {
       if (retry) {
         FileSys.makeFreshConfig();
-        return FileSys.readData(false);
+        return FileSys.readData<T>(false, generic);
       }
     }
   };
 
-  static writeData = <T = ConfigShape>(data: T) => {
-    FS.open("gtracker.json").write(JSON.stringify(data, null, 2));
+  static writeData = <T extends ConfigShape>(data: T, generic: boolean) => {
+    FS.open(filename(generic)).write(JSON.stringify(data, null, 2));
   };
 
   static makeFreshConfig = () => {
     const cfg = {};
     const id = getWorldIdentifier();
-    cfg[id] = {};
+    const world = {};
+    world[id] = {};
     for (const [key, val] of Object.entries(CONFIG_DEFAULTS)) {
       if (CONFIG_WORLD_SPECIFIC.includes(key as ConfigWorldSpecificValue)) {
-        cfg[id][key] = val;
+        world[id][key] = val;
       } else {
         cfg[key] = val;
       }
     }
-    FileSys.writeData(<ConfigShape>cfg);
+    FileSys.writeData(<GenericConfigShape>cfg, true);
+    FileSys.writeData(<WorldConfigShape>world, false);
   };
 
   static makeWorldSpecificDefaults = () => {
-    const data = FileSys.readData();
+    const data = FileSys.readData(false);
     const id = getWorldIdentifier();
-    //@ts-expect-error Required values are assigned in for loop
     data[id] = {};
     for (const [key, val] of Object.entries(CONFIG_DEFAULTS)) {
       if (CONFIG_WORLD_SPECIFIC.includes(key as ConfigWorldSpecificValue)) {
         data[getWorldIdentifier()][key] = val;
       }
     }
-    FileSys.writeData(data);
+    FileSys.writeData(<WorldConfigShape>data, false);
   };
 
   static getConfigValue = <K extends keyof ConfigDefaults>(key: K): ConfigDefaults[K] => {
     //@ts-expect-error Could be fixed by not defining it with the `as const` declaration,
     // but then I can't use it to construct `ConfigShape`. It works fine though.
     if (CONFIG_WORLD_SPECIFIC.includes(key)) {
-      const val = FileSys.readData()[getWorldIdentifier()]?.[key as keyof typeof CONFIG_WORLD_SPECIFIC];
+      const val =
+        FileSys.readData<WorldConfigShape>(false)[getWorldIdentifier()]?.[key as keyof typeof CONFIG_WORLD_SPECIFIC];
       if (val === undefined) {
         FileSys.makeWorldSpecificDefaults();
       }
       return (
-        FileSys.readData()[getWorldIdentifier()]?.[key as keyof typeof CONFIG_WORLD_SPECIFIC] ?? CONFIG_DEFAULTS[key]
+        FileSys.readData<WorldConfigShape>(false)[getWorldIdentifier()]?.[key as keyof typeof CONFIG_WORLD_SPECIFIC] ??
+        CONFIG_DEFAULTS[key]
       );
     }
-    // World-specific properties have already been handled, so ConfigShape[key] is ConfigDefaults[K]
-    return (FileSys.readData()?.[key] as unknown as ConfigDefaults[K]) ?? CONFIG_DEFAULTS[key];
+    return (FileSys.readData<GenericConfigShape>(true)?.[key] as unknown as ConfigDefaults[K]) ?? CONFIG_DEFAULTS[key];
   };
 
   static setConfigValue = <K extends keyof ConfigDefaults, V extends ConfigDefaults[K]>(key: K, val: V) => {
     //@ts-expect-error see above
     if (CONFIG_WORLD_SPECIFIC.includes(key)) {
-      FileSys.writeData({
-        ...FileSys.readData(),
-        [getWorldIdentifier()]: {
-          ...FileSys.readData()[getWorldIdentifier()],
-          [key]: val,
+      const data = FileSys.readData<WorldConfigShape>(false);
+      const id = getWorldIdentifier();
+      FileSys.writeData<WorldConfigShape>(
+        {
+          ...data,
+          [id]: {
+            ...data[id],
+            [key]: val,
+          },
         },
-      });
+        false
+      );
     } else {
-      FileSys.writeData({ ...FileSys.readData(), [key]: val });
+      FileSys.writeData<GenericConfigShape>({ ...FileSys.readData<GenericConfigShape>(true), [key]: val }, true);
     }
   };
 
-  static writeGoldStorageCount = (pos: Pos, count: number) => {
+  static setGoldStorageCount = (pos: Pos, count: number) => {
     const declared = FileSys.getConfigValue("declaredGoldStorages");
-    declared[declared.findIndex((val) => JSON.stringify(val.coords) === JSON.stringify(pos))].count = count;
+    declared[<PosString>pos.join(",")].count = count;
     FileSys.setConfigValue("declaredGoldStorages", declared);
     declaredGoldStorages = declared;
   };
 
-  static readGoldStorageCount = (pos: Pos): number => {
-    return declaredGoldStorages[
-      declaredGoldStorages.findIndex((val) => JSON.stringify(val.coords) === JSON.stringify(pos))
-    ].count;
+  static getGoldStorageCount = (pos: Pos): number => {
+    return declaredGoldStorages[<PosString>pos.join(",")].count;
+  };
+
+  static setGoldStorageNickname = (pos: Pos, nickname: string) => {
+    const declared = FileSys.getConfigValue("declaredGoldStorages");
+    declared[<PosString>pos.join(",")].nickname = nickname === "null" ? null : nickname;
+    FileSys.setConfigValue("declaredGoldStorages", declared);
+    declaredGoldStorages = declared;
   };
 }
+
+const updateDeclaredGoldStorages = () => {
+  declaredGoldStorages = FileSys.getConfigValue("declaredGoldStorages");
+};
+
+const refresh = (viaCommand = false, noPull = false) => {
+  log("🔄 Refreshing script memory and 3D overlays", 0xf, !viaCommand);
+  !noPull && pullGold(true);
+  updateDeclaredGoldStorages();
+  updateDeclaredGoldStorageD3D();
+};
 
 const getWorldIdentifier = () => {
   return World.getWorldIdentifier().toString();
 };
-if (!getWorldIdentifier() || getWorldIdentifier() === "UNKNOWN_NAME")
-  throw new Error("Your world has no identification.");
 
+const showHelp = () => {
+  const b = Chat.createTextBuilder();
+  b.append("~$~gtracker~$~\n").withColor(0xe);
+  b.append("This service synchronises a pool of gold between multiple players.\n\n");
+  b.append("Commands:\n");
+
+  for (const doc of DOCS) {
+    b.append(doc.cmd).withColor(0x7).append(`: ${doc.desc}\n`);
+  }
+  b.append("~$~========~$~").withColor(0xe);
+  Chat.log(b.build());
+};
+
+const filename = (generic: boolean) =>
+  generic
+    ? `${FileSys.JSON_DIR}/${FileSys.GENERIC_CONFIG_FILENAME}`
+    : `${FileSys.JSON_DIR}/${FileSys.WORLD_CONFIG_FILENAME}`;
+
+const check = () => {
+  if (Player.getGameMode() === "creative") throw new Error("You cannot use gtracker in creative.");
+  if (
+    World.getCurrentServerAddress()
+      .toString()
+      .match(/local:\w:[a-zA-Z0-9]{8,}/)
+  )
+    throw new Error("You cannot use gtracker in singleplayer.");
+  if (!getWorldIdentifier() || getWorldIdentifier() === "UNKNOWN_NAME")
+    throw new Error("Your world has no identification.");
+  if (!FS.exists(FileSys.JSON_DIR)) FS.makeDir(FileSys.JSON_DIR);
+};
+
+check();
 let pushCooldownDuration = FileSys.getConfigValue("pushCooldownDurationSeconds") * 1000;
 let pullIntervalInTicks = FileSys.getConfigValue("pullIntervalSeconds") * 20;
 let declaredGoldStorages = FileSys.getConfigValue("declaredGoldStorages");
+let goldRecordEntryLimit = FileSys.getConfigValue("goldRecordEntryLimit");
 
 h2d.setOnInit(
   JavaWrapper.methodToJava((d) => {
@@ -202,11 +293,15 @@ h2d.setOnInit(
     const { compiled, totalGoldCount } = compileFormattedGoldData();
     if (!compiled.length) return d.addText("No gold records available", x, y, COLOURS.red, true).setScale(h2d_scale);
     d.addText(`gtracker (${totalGoldCount}g)`, x, y, COLOURS.gold, true).setScale(h2d_scale);
-    for (const [name, gold] of compiled) {
+    const sliced = compiled.slice(0, goldRecordEntryLimit);
+    for (const [name, gold] of sliced) {
+      const nickname = name.startsWith("[")
+        ? declaredGoldStorages[<PosString>keyStringToPos(name).join(",")]?.nickname ?? name
+        : name;
       y += 12;
       d.addText(
         Chat.createTextHelperFromJSON(
-          JSON.stringify(["", { "text": `${name}: ` }, { "text": `${gold}g`, "color": "#cc990e" }])
+          JSON.stringify(["", { "text": `${nickname}: ` }, { "text": `${gold}g`, "color": "#cc990e" }])
         ),
         x,
         y,
@@ -214,13 +309,27 @@ h2d.setOnInit(
         true
       ).setScale(h2d_scale);
     }
+    y += 12;
+    if (sliced.length !== compiled.length)
+      d.addText(`...and ${compiled.length - sliced.length} more`, x, y, 0xffffff, true).setScale(h2d_scale);
   })
 );
 
+const distanceFrom = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) =>
+  Math.hypot(x2 - x1, y2 - y1, z2 - z1);
+
 const updateDeclaredGoldStorageD3D = () => {
   Hud.clearDraw3Ds();
+  const playerPos = Player.getPlayer().getPos();
+  const renderDistanceRadius = Client.getGameOptions().getVideoOptions().getRenderDistance() * 16;
   d3d = Hud.createDraw3D();
-  declaredGoldStorages.map(({ coords }) => {
+  Object.keys(declaredGoldStorages).map((c) => {
+    const coords = c.split(",").map(Number);
+    if (
+      distanceFrom(playerPos.getX(), playerPos.getY(), playerPos.getZ(), coords[0], coords[1], coords[2]) >
+      renderDistanceRadius
+    )
+      return;
     d3d.addBox(
       coords[0],
       coords[1],
@@ -299,14 +408,21 @@ const isLookingAtGoldStorage = () => {
   if (!rtb) return false;
 
   const pos = <Pos>[rtb.getX(), rtb.getY(), rtb.getZ()];
-  if (declaredGoldStorages.find(({ coords }) => JSON.stringify(coords) === JSON.stringify(pos))) {
+  if (pos.join(",") in declaredGoldStorages) {
     return pos;
   }
   return false;
 };
 
-const declaredGoldStorageToKeyString = (pos: Pos) => {
+const posToKeyString = (pos: Pos) => {
   return `[C@${pos.join(",")}]`;
+};
+
+const keyStringToPos = (str: string) => {
+  return <Pos>str
+    .match(extractPosFromKeyStringRegex)[1]
+    .split(",")
+    .map((coord) => parseInt(coord));
 };
 
 const getGoldCache = () => GlobalVars.getDouble("gtracker.gcache") ?? 0;
@@ -325,7 +441,7 @@ const handleInvalidRequest = (res: HTTPRequest$Response) => {
 
 const pushGold = (viaCommand = false) => {
   const goldCount = getGoldCache();
-  log(`↑ Pushing new gold count: ${goldCount}`, 0xf, !viaCommand);
+  log(`↑ Pushing new personal gold count: ${goldCount}`, 0xf, !viaCommand);
   pushCooldown = pushCooldownDuration;
   const res = Request.post(
     DENO_API + "update",
@@ -341,7 +457,7 @@ const pushGold = (viaCommand = false) => {
 };
 
 const pushGoldStorage = (pos: Pos, count: number) => {
-  const str = declaredGoldStorageToKeyString(pos);
+  const str = posToKeyString(pos);
   log(`↑ Pushing new gold count: ${count} to ${str}`, 0xf, true);
   const res = Request.post(
     DENO_API + "update",
@@ -355,19 +471,18 @@ const pushGoldStorage = (pos: Pos, count: number) => {
   handleInvalidRequest(res);
 };
 
-const wipeGoldStorage = (pos: Pos) => {
-  const str = declaredGoldStorageToKeyString(pos);
+const wipeGoldStorages = (positions: Pos[]) => {
   const res = Request.post(
     DENO_API + "wipe",
     JSON.stringify({
-      type: "single",
-      key: [getWorldIdentifier(), str],
+      type: "multiple",
+      serverIdentifier: getWorldIdentifier(),
+      keys: positions.map((pos) => posToKeyString(pos)),
     }),
     //@ts-expect-error Works
     getAuthHeader(WIPE_TOKEN)
   );
   if (handleInvalidRequest(res)) return;
-  pullGold();
 };
 
 const pullGold = (viaCommand = false) => {
@@ -404,6 +519,119 @@ const getGoldCount = (inv: Inventory = null, container = false, slots: number[] 
   return count;
 };
 
+const synchroniseGoldStorages = (viaCommand = false) => {
+  log("⇔ Synchronising gold storages", 0xf, !viaCommand);
+  const serverStorages: [Pos, number][] = Object.entries(records)
+    .filter(([uuid]) => uuid.startsWith("["))
+    .map(([key, number]) => [keyStringToPos(key), number]);
+  const clientStorages = FileSys.getConfigValue("declaredGoldStorages");
+  const removedOnClient: Pos[] = [];
+  const addedOnServer: [Pos, number][] = [];
+  for (const [pos, goldCount] of serverStorages) {
+    const block = World?.getBlock(...pos)
+      ?.getId()
+      .toString();
+    if (block && !VALID_GOLD_STORAGES.includes(block)) {
+      removedOnClient.push(pos);
+    } else if (!(pos.join(",") in clientStorages)) {
+      addedOnServer.push([pos, goldCount]);
+    }
+  }
+
+  let shouldPull = false;
+
+  if (removedOnClient.length) {
+    DEBUG && log(`${removedOnClient.length} removed on client`);
+    wipeGoldStorages(removedOnClient);
+    for (const pos of removedOnClient) {
+      renounceGoldStorage(null, false, pos);
+    }
+    shouldPull = true;
+  }
+  viaCommand &&
+    removedOnClient.length &&
+    log(`Removed ${removedOnClient.length} storage(s) from your client that were not present on the server.`);
+
+  let notloaded = 0;
+  let added = 0;
+
+  if (addedOnServer.length) {
+    DEBUG && log(`${addedOnServer.length} removed on client`);
+    for (const [pos, goldCount] of addedOnServer) {
+      const res = declareGoldStorage(null, false, pos);
+      if (res === "notloaded") {
+        notloaded++;
+        continue;
+      }
+      added++;
+      FileSys.setGoldStorageCount(pos, goldCount);
+    }
+    shouldPull = true;
+  }
+  viaCommand && added && log(`Added ${added} storage(s) from the server that were not present on your client.`);
+
+  viaCommand &&
+    notloaded &&
+    log(`${notloaded} storage(s) could not be added on your client as they are not loaded.`, 0x6);
+  shouldPull && pullGold();
+  return shouldPull;
+};
+
+const declareGoldStorage = (ctx: Events.CommandContext = null, viaCommand: boolean, position: Pos = null) => {
+  const pos = position || ctx.getArg("pos");
+  const block = position ? World.getBlock(...position) : World.getBlock(pos.toPos3D());
+
+  if (!block) {
+    viaCommand && log("This block is not loaded", 0xc);
+    return "notloaded";
+  }
+  const blockPos = block.getBlockPos();
+  const blockPosArr: Pos = [blockPos.getX(), blockPos.getY(), blockPos.getZ()];
+  const id = block.getId().toString();
+
+  const chestType = block.getBlockState()?.get("type");
+  if (!(VALID_GOLD_STORAGES.includes(id) || chestType === "single")) {
+    return log("Only single chests or barrels are accepted as shared gold storages.", 0x6);
+  }
+
+  const declared = FileSys.getConfigValue("declaredGoldStorages");
+  if (blockPosArr.join(",") in declared) {
+    return log("This storage has already been declared.", 0xc);
+  }
+
+  declared[<PosString>blockPosArr.join(",")] = { type: chestType ? "singleChest" : "barrel", count: 0, nickname: null };
+  FileSys.setConfigValue("declaredGoldStorages", declared);
+  declaredGoldStorages = declared;
+  updateDeclaredGoldStorageD3D();
+  viaCommand && log("Declared this storage", 0xa);
+};
+
+const renounceGoldStorage = (ctx: Events.CommandContext = null, viaCommand: boolean, position: Pos = null) => {
+  const pos = position || ctx.getArg("pos");
+  const block = position ? World.getBlock(...position) : World.getBlock(pos.toPos3D());
+
+  if (!block) {
+    viaCommand && log("This block is not loaded", 0xc);
+    return;
+  }
+  const blockPos = block.getBlockPos();
+  const blockPosArr = <Pos>[blockPos.getX(), blockPos.getY(), blockPos.getZ()];
+
+  let declared = FileSys.getConfigValue("declaredGoldStorages");
+  if (!(blockPosArr.join(",") in declared)) {
+    ctx && log("This storage has not been declared.", 0xc);
+    return;
+  }
+
+  delete declared[blockPosArr.join(",")];
+  FileSys.setConfigValue("declaredGoldStorages", declared);
+  declaredGoldStorages = declared;
+  updateDeclaredGoldStorageD3D();
+  wipeGoldStorages([blockPosArr]);
+  pullGold();
+  viaCommand && log("Renounced this storage", 0xa);
+};
+
 const itemPickupListener = JsMacros.on(
   "ItemPickup",
   JavaWrapper.methodToJavaAsync((ctx) => {
@@ -434,7 +662,7 @@ const dropSlotListener = JsMacros.on(
           if (!pos) return log("Shared gold storage not declared", 0xc, true);
           scm.updateGold(inv);
           scm.wasSlotDropped = true;
-          FileSys.writeGoldStorageCount(pos, scm.contGoldCount);
+          FileSys.setGoldStorageCount(pos, scm.contGoldCount);
         }
       } else {
         updateGoldCount();
@@ -455,10 +683,13 @@ const openContainerListener = JsMacros.on(
     } else {
       DEBUG && log("Handle shared gold storage", 0xf, true);
       const pos = isLookingAtGoldStorage();
-      if (!pos) return log("Shared gold storage not declared", 0xc, true);
       scm.updateGold(ctx.inventory);
-      scm.contPos = [...pos];
       scm.wasOpen = true;
+      if (!pos) {
+        scm.wasNotDeclared = true;
+        return log("Shared gold storage not declared", 0xc, true);
+      }
+      scm.contPos = [...pos];
     }
   })
 );
@@ -503,28 +734,35 @@ const closeContainerListener = JsMacros.on(
       scm.wasOpen = false;
       let redistributed = true;
       const currentMainGoldCount = getGoldCount();
-      if (currentMainGoldCount < scm.mainGoldCount) {
-        FileSys.writeGoldStorageCount(scm.contPos, scm.contGoldCount + (scm.mainGoldCount - currentMainGoldCount));
-      } else if (currentMainGoldCount > scm.mainGoldCount) {
-        FileSys.writeGoldStorageCount(
-          scm.contPos,
-          scm.contGoldCount - Math.abs(scm.mainGoldCount - currentMainGoldCount)
-        );
-      } else {
-        if (FileSys.readGoldStorageCount(scm.contPos) !== scm.contGoldCount) {
-          FileSys.writeGoldStorageCount(scm.contPos, scm.contGoldCount);
-          DEBUG && log("Updating shared storage gold count, despite no redistribution.", 0xf, true);
+      if (!scm.wasNotDeclared) {
+        if (currentMainGoldCount < scm.mainGoldCount) {
+          FileSys.setGoldStorageCount(scm.contPos, scm.contGoldCount + (scm.mainGoldCount - currentMainGoldCount));
+        } else if (currentMainGoldCount > scm.mainGoldCount) {
+          FileSys.setGoldStorageCount(
+            scm.contPos,
+            scm.contGoldCount - Math.abs(scm.mainGoldCount - currentMainGoldCount)
+          );
         } else {
-          DEBUG && log("No shared gold storage update, but slot drop flag may be true.", 0xf, true);
-          redistributed = false;
+          if (FileSys.getGoldStorageCount(scm.contPos) !== scm.contGoldCount) {
+            FileSys.setGoldStorageCount(scm.contPos, scm.contGoldCount);
+            DEBUG && log("Updating shared storage gold count, despite no redistribution.", 0xf, true);
+          } else {
+            DEBUG && log("No shared gold storage update, but slot drop flag may be true.", 0xf, true);
+            redistributed = false;
+          }
         }
+      } else {
+        redistributed = false;
       }
 
       if (redistributed || scm.wasSlotDropped) {
         // Should a cooldown be added to pushing gold storage?
         scm.wasSlotDropped = false;
-        pushGoldStorage(scm.contPos, FileSys.readGoldStorageCount(scm.contPos));
+        pushGoldStorage(scm.contPos, FileSys.getGoldStorageCount(scm.contPos));
         updateGoldCount(true);
+      } else if (scm.wasNotDeclared) {
+        if (currentMainGoldCount !== scm.mainGoldCount) updateGoldCount(true);
+        scm.wasNotDeclared = false;
       }
     }
   })
@@ -545,13 +783,20 @@ const breakStorageListener = JsMacros.on(
       const declared = FileSys.getConfigValue("declaredGoldStorages");
       const blockPos = currentAttackedBlock.getBlockPos();
       const pos = <Pos>[blockPos.getX(), blockPos.getY(), blockPos.getZ()];
-      if (declared.find((val) => JSON.stringify(val.coords) === JSON.stringify(pos))) {
-        Chat.say(`/gtk goldStorage renounce ${pos.join(" ")}`);
-        wipeGoldStorage(pos);
+      if (pos.join(",") in declared) {
+        renounceGoldStorage(null, true, pos);
+        wipeGoldStorages([pos]);
+        pullGold();
       }
+      synchroniseGoldStorages();
     }
   })
 );
+
+const joinWorldListener = JsMacros.on("JoinServer", JavaWrapper.methodToJavaAsync(() => {
+  Time.sleep(1000);
+  check();
+}));
 
 const tickListener = JsMacros.on(
   "Tick",
@@ -560,18 +805,40 @@ const tickListener = JsMacros.on(
     if (World.getTime() % pullIntervalInTicks) return;
 
     pullGold();
+    refresh(false, true);
+    synchroniseGoldStorages();
   })
 );
 
 const chunkLoadListener = JsMacros.on("ChunkLoad", JavaWrapper.methodToJavaAsync(updateDeclaredGoldStorageD3D));
 
+const changeDimensionListener = JsMacros.on(
+  "DimensionChange",
+  JavaWrapper.methodToJavaAsync(() => {
+    Time.sleep(1000);
+    refresh();
+  })
+);
+
 const cmd = Chat.getCommandManager()
   .createCommandBuilder("gtk")
+  .executes(JavaWrapper.methodToJavaAsync(showHelp))
   .literalArg("push")
   .executes(JavaWrapper.methodToJavaAsync(() => updateGoldCount(false, true)))
   .or(0)
   .literalArg("forcePush")
   .executes(JavaWrapper.methodToJavaAsync(() => updateGoldCount(true, true)))
+  .or(0)
+  .literalArg("help")
+  .executes(JavaWrapper.methodToJavaAsync(showHelp))
+  .or(0)
+  .literalArg("sync")
+  .executes(
+    JavaWrapper.methodToJavaAsync(() => {
+      refresh(true);
+      synchroniseGoldStorages(true);
+    })
+  )
   .or(0)
   .literalArg("pull")
   .executes(JavaWrapper.methodToJavaAsync(() => pullGold(true)))
@@ -635,7 +902,37 @@ const cmd = Chat.getCommandManager()
   .executes(
     JavaWrapper.methodToJavaAsync(() => {
       const val = CONFIG_DEFAULTS.pullIntervalSeconds;
+      pullIntervalInTicks = val * 20;
       FileSys.setConfigValue("pullIntervalSeconds", val);
+      log(`Reset value to ${val}`);
+    })
+  )
+  .or(2)
+  .literalArg("goldRecordEntryLimit")
+  .executes(
+    JavaWrapper.methodToJavaAsync(() => {
+      log(`Current value is ${goldRecordEntryLimit}`);
+    })
+  )
+  .literalArg("set")
+  .intArg("val")
+  .executes(
+    JavaWrapper.methodToJavaAsync((ctx) => {
+      const val = ctx.getArg("val");
+      goldRecordEntryLimit = val;
+      FileSys.setConfigValue("goldRecordEntryLimit", val);
+      h2d.register();
+      log(`Set value to ${val}`);
+    })
+  )
+  .or(3)
+  .literalArg("reset")
+  .executes(
+    JavaWrapper.methodToJavaAsync(() => {
+      const val = CONFIG_DEFAULTS.goldRecordEntryLimit;
+      goldRecordEntryLimit = val;
+      FileSys.setConfigValue("goldRecordEntryLimit", val);
+      h2d.register();
       log(`Reset value to ${val}`);
     })
   )
@@ -654,71 +951,49 @@ const cmd = Chat.getCommandManager()
     })
   )
   .or(0)
-  .literalArg("goldStorage")
+  .literalArg("gstorage")
   .literalArg("declare")
   .blockPosArg("pos")
-  .executes(
-    JavaWrapper.methodToJavaAsync((ctx) => {
-      const pos = ctx.getArg("pos");
-
-      const block = World.getBlock(pos.toPos3D());
-      if (!block) return log("This block is not loaded", 0xc);
-      const blockPos = block.getBlockPos();
-      const blockPosArr: Pos = [blockPos.getX(), blockPos.getY(), blockPos.getZ()];
-      const id = block.getId().toString();
-
-      const chestType = block.getBlockState()?.get("type");
-      if (!(["minecraft:barrel", "minecraft:chest"].includes(id) || chestType === "single")) {
-        return log("Currently, only single chests or barrels are accepted as shared gold storages.", 0x6);
-      }
-
-      const declared = FileSys.getConfigValue("declaredGoldStorages");
-      if (declared.find((val) => JSON.stringify(val.coords) === JSON.stringify(blockPosArr))) {
-        return log("This container has already been declared.", 0xc);
-      }
-
-      declared.push({ type: chestType ? "singleChest" : "barrel", coords: blockPosArr, count: 0 });
-      FileSys.setConfigValue("declaredGoldStorages", declared);
-      declaredGoldStorages = declared;
-      updateDeclaredGoldStorageD3D();
-      log("Declared this storage", 0xa);
-    })
-  )
+  .executes(JavaWrapper.methodToJavaAsync((ctx) => declareGoldStorage(ctx, true)))
   .or(2)
   .literalArg("renounce")
   .blockPosArg("pos")
   .suggest(
     JavaWrapper.methodToJava((_, b) =>
-      b.suggestMatching(FileSys.getConfigValue("declaredGoldStorages").map((val) => val.coords.join(" ")))
+      b.suggestMatching(
+        Object.keys(FileSys.getConfigValue("declaredGoldStorages")).map((coords) => coords.split(",").join(" "))
+      )
     )
   )
+  .executes(JavaWrapper.methodToJavaAsync((ctx) => renounceGoldStorage(ctx, true)))
+  .or(2)
+  .literalArg("nickname")
+  .blockPosArg("pos")
+  .suggest(
+    JavaWrapper.methodToJava((_, b) =>
+      b.suggestMatching(
+        Object.keys(FileSys.getConfigValue("declaredGoldStorages")).map((coords) => coords.split(",").join(" "))
+      )
+    )
+  )
+  .wordArg("nickname")
   .executes(
     JavaWrapper.methodToJavaAsync((ctx) => {
-      const pos = ctx.getArg("pos");
-
-      const block = World.getBlock(pos.toPos3D());
-      if (!block) return log("This block is not loaded", 0xc);
-      const blockPos = block.getBlockPos();
-      const blockPosArr = [blockPos.getX(), blockPos.getY(), blockPos.getZ()];
-
-      let declared = FileSys.getConfigValue("declaredGoldStorages");
-      if (!declared.find((val) => JSON.stringify(val.coords) === JSON.stringify(blockPosArr))) {
-        return log("This container has not been declared.", 0xc);
-      }
-
-      declared = declared.filter((val) => JSON.stringify(val.coords) !== JSON.stringify(blockPosArr));
-      FileSys.setConfigValue("declaredGoldStorages", declared);
-      declaredGoldStorages = declared;
-      updateDeclaredGoldStorageD3D();
-      log("Renounced this storage", 0xa);
+      const pos = ctx.getArg("pos").toPos3D();
+      const blockPos = [pos.getX(), pos.getY(), pos.getZ()];
+      if (!(blockPos.join(",") in declaredGoldStorages)) return log("This storage has not been declared.", 0xc);
+      FileSys.setGoldStorageNickname(<Pos>blockPos, ctx.getArg("nickname"));
+      h2d.register();
+      log("This storage has been nicknamed");
     })
   )
   .register();
 
-log("Initialised gtracker! Command prefix is gtk.", 0xa);
+log("Initialised gtracker! Try /gtk.", 0xa);
 setGoldCache(getGoldCount() + FileSys.getConfigValue("echestGoldCount"));
 updateGoldCount(true, true);
 updateDeclaredGoldStorageD3D();
+synchroniseGoldStorages();
 h2d.register();
 
 //@ts-expect-error Intended usage
@@ -728,9 +1003,11 @@ event.stopListener = JavaWrapper.methodToJava(() => {
   JsMacros.off(openContainerListener);
   JsMacros.off(closeContainerListener);
   JsMacros.off(chunkLoadListener);
+  JsMacros.off(joinWorldListener);
   JsMacros.off(tickListener);
   JsMacros.off(attackBlockListener);
   JsMacros.off(breakStorageListener);
+  JsMacros.off(changeDimensionListener);
   cmd.unregister();
   Hud.clearDraw2Ds();
   Hud.clearDraw3Ds();
