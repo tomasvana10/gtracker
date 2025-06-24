@@ -7,15 +7,15 @@
  * containers (which must be declared) are a separate entity.
  */
 
-const DEBUG = false;
+const DEBUG = true;
 
 const extractPosFromKeyStringRegex = /\[C@(\d+,\d+,\d+)\]/;
 
 const DENO_API = "https://gtracker.deno.dev/api/";
 const UUID_API = "https://sessionserver.mojang.com/session/minecraft/profile/";
 
-const UPDATE_TOKEN = "yTmxQAVbxi2jzRKt07gOWjeiFl7IvB9o";
-const WIPE_TOKEN = "FfFUUkIhl0y5qZaEiX1jI2x2To5fx4A6";
+const UPDATE_TOKEN = "";
+const WIPE_TOKEN = "";
 
 // You can change this to whatever you like
 const GOLD_WEIGHTINGS = Object.fromEntries(
@@ -43,13 +43,13 @@ const DOCS = [
   },
   { cmd: "forcePush", desc: "Push your gold to the server, disregarding any cooldowns." },
   {
-    cmd: "gstorage declare <x> <y> <z>",
+    cmd: "storage declare <x> <y> <z>",
     desc: "Declare a gold storage, adding it on your client. It will be added to the server once you provide it with gold.",
   },
-  { cmd: "gstorage renounce <x> <y> <z>", desc: "Remove a gold storage from the client and the server." },
+  { cmd: "storage renounce <x> <y> <z>", desc: "Remove a gold storage from the client and the server." },
   { cmd: "pull", desc: "Get the most up-to-date gold records for your server's pool." },
   {
-    cmd: "gstorage nickname <x> <y> <z> (<nickname> | null)",
+    cmd: "storage nickname <x> <y> <z> (<nickname> | null)",
     desc: "Nickname a gold storage (purely client side). Provide 'null' to remove it.",
   },
   {
@@ -104,6 +104,7 @@ const CONFIG_DEFAULTS: {
     [key: PosString]: { type: "singleChest" | "barrel"; count: number; nickname: null | string };
   };
   goldRecordEntryLimit: number;
+  doNotSortGoldRecords: boolean;
 } = {
   verbose: false,
   pushCooldownDurationSeconds: 10,
@@ -111,7 +112,8 @@ const CONFIG_DEFAULTS: {
   inGameNameMap: {},
   echestGoldCount: 0,
   declaredGoldStorages: {},
-  goldRecordEntryLimit: 5,
+  goldRecordEntryLimit: 10,
+  doNotSortGoldRecords: false,
 };
 const CONFIG_WORLD_SPECIFIC = ["declaredGoldStorages", "echestGoldCount"] as const;
 
@@ -281,10 +283,12 @@ const check = () => {
 };
 
 check();
+let verbose = FileSys.getConfigValue("verbose");
 let pushCooldownDuration = FileSys.getConfigValue("pushCooldownDurationSeconds") * 1000;
 let pullIntervalInTicks = FileSys.getConfigValue("pullIntervalSeconds") * 20;
 let declaredGoldStorages = FileSys.getConfigValue("declaredGoldStorages");
 let goldRecordEntryLimit = FileSys.getConfigValue("goldRecordEntryLimit");
+let doNotSortGoldRecords = FileSys.getConfigValue("doNotSortGoldRecords");
 
 h2d.setOnInit(
   JavaWrapper.methodToJava((d) => {
@@ -295,19 +299,31 @@ h2d.setOnInit(
     d.addText(`gtracker (${totalGoldCount}g)`, x, y, COLOURS.gold, true).setScale(h2d_scale);
     const sliced = compiled.slice(0, goldRecordEntryLimit);
     for (const [name, gold] of sliced) {
-      const nickname = name.startsWith("[")
-        ? declaredGoldStorages[<PosString>keyStringToPos(name).join(",")]?.nickname ?? name
-        : name;
+      let nickname: string;
+      let posTupleString: string | null = null;
+      let isGStorage = false;
+
+      if (name.startsWith("[")) {
+        isGStorage = true;
+        const pos = keyStringToPos(name);
+        const nick = declaredGoldStorages[<PosString>pos.join(",")]?.nickname;
+        posTupleString = posToTupleString(pos);
+        nickname = nick ? nick + " " : "";
+      } else {
+        nickname = name;
+      }
+
+      const text = Chat.createTextBuilder().append(nickname + (isGStorage ? "" : ": "));
+      if (posTupleString)
+        text
+          .append(posTupleString)
+          .withColor(0x7)
+          .withFormatting(false, false, true, false, false)
+          .append(": ");
+      text.append(`${gold}g`).withColor(0x6);
+
       y += 12;
-      d.addText(
-        Chat.createTextHelperFromJSON(
-          JSON.stringify(["", { "text": `${nickname}: ` }, { "text": `${gold}g`, "color": "#cc990e" }])
-        ),
-        x,
-        y,
-        0xffffff,
-        true
-      ).setScale(h2d_scale);
+      d.addText(text.build(), x, y, 0xffffff, true).setScale(h2d_scale);
     }
     y += 12;
     if (sliced.length !== compiled.length)
@@ -348,7 +364,7 @@ const updateDeclaredGoldStorageD3D = () => {
 };
 
 const log = (msg: string, colour = 0xf, forVerboseMode = false) => {
-  if (forVerboseMode && !FileSys.getConfigValue("verbose")) return;
+  if (forVerboseMode && !verbose) return;
 
   Chat.log(
     Chat.createTextBuilder()
@@ -395,10 +411,11 @@ const resolveInGameNames = () => {
 };
 
 const compileFormattedGoldData = () => {
-  const compiled = Object.entries({
+  let compiled = Object.entries({
     ...recordsWithInGameNames,
     ...Object.fromEntries(Object.entries(records).filter(([uuid]) => uuid.startsWith("["))),
-  }).sort((a, b) => b[1] - a[1]);
+  });
+  if (!doNotSortGoldRecords) compiled = compiled.sort((a, b) => b[1] - a[1]);
   const totalGoldCount = compiled.reduce((acc, val) => acc + val[1], 0);
   return { compiled, totalGoldCount };
 };
@@ -416,6 +433,10 @@ const isLookingAtGoldStorage = () => {
 
 const posToKeyString = (pos: Pos) => {
   return `[C@${pos.join(",")}]`;
+};
+
+const posToTupleString = (pos: Pos) => {
+  return `(${pos.join(",")})`;
 };
 
 const keyStringToPos = (str: string) => {
@@ -681,7 +702,7 @@ const openContainerListener = JsMacros.on(
       ecm.updateGold(ctx.inventory);
       ecm.wasOpen = true;
     } else {
-      DEBUG && log("Handle shared gold storage", 0xf, true);
+      DEBUG && log("Handle shared gold storage", 0xf, false);
       const pos = isLookingAtGoldStorage();
       scm.updateGold(ctx.inventory);
       scm.wasOpen = true;
@@ -715,7 +736,7 @@ const closeContainerListener = JsMacros.on(
         redistributed = false;
         if (FileSys.getConfigValue("echestGoldCount") !== ecm.contGoldCount) {
           FileSys.setConfigValue("echestGoldCount", ecm.contGoldCount);
-          DEBUG && log("Updating echest gold count, despite no redistribution. ", 0xf, true);
+          DEBUG && log("Updating echest gold count, despite no redistribution. ", 0xf, false);
         }
       }
       const totalGoldCount = ecm.mainGoldCount + ecm.contGoldCount;
@@ -724,7 +745,7 @@ const closeContainerListener = JsMacros.on(
           log(
             `No need to push new count${redistributed ? ", but the echest/inventory was redistributed." : "."}`,
             0xf,
-            true
+            false
           );
       } else {
         setGoldCache(totalGoldCount);
@@ -745,9 +766,9 @@ const closeContainerListener = JsMacros.on(
         } else {
           if (FileSys.getGoldStorageCount(scm.contPos) !== scm.contGoldCount) {
             FileSys.setGoldStorageCount(scm.contPos, scm.contGoldCount);
-            DEBUG && log("Updating shared storage gold count, despite no redistribution.", 0xf, true);
+            DEBUG && log("Updating shared storage gold count, despite no redistribution.", 0xf, false);
           } else {
-            DEBUG && log("No shared gold storage update, but slot drop flag may be true.", 0xf, true);
+            DEBUG && log("No shared gold storage update, but slot drop flag may be true.", 0xf, false);
             redistributed = false;
           }
         }
@@ -807,6 +828,7 @@ const tickListener = JsMacros.on(
     if (pushCooldown) pushCooldown -= 50;
     if (World.getTime() % pullIntervalInTicks) return;
 
+    updateGoldCount(true, false);
     pullGold();
     refresh(false, true);
     synchroniseGoldStorages();
@@ -850,9 +872,9 @@ const cmd = Chat.getCommandManager()
   .literalArg("verbose")
   .executes(
     JavaWrapper.methodToJavaAsync(() => {
-      const verbose = FileSys.getConfigValue("verbose");
-      FileSys.setConfigValue("verbose", !verbose);
-      log(`Verbose mode toggled ${!verbose ? "on" : "off"}`);
+      verbose = !FileSys.getConfigValue("verbose");
+      FileSys.setConfigValue("verbose", verbose);
+      log(`verbose toggled ${verbose ? "on" : "off"}`);
     })
   )
   .or(2)
@@ -940,6 +962,15 @@ const cmd = Chat.getCommandManager()
     })
   )
   .or(2)
+  .literalArg("doNotSortGoldRecords")
+  .executes(
+    JavaWrapper.methodToJavaAsync(() => {
+      doNotSortGoldRecords = !FileSys.getConfigValue("doNotSortGoldRecords");
+      FileSys.setConfigValue("doNotSortGoldRecords", doNotSortGoldRecords);
+      log(`doNotSetGoldRecords toggled ${doNotSortGoldRecords ? "on" : "off"}`);
+    })
+  )
+  .or(2)
   .literalArg("inGameNameMap")
   .executes(
     JavaWrapper.methodToJavaAsync(() => {
@@ -954,13 +985,14 @@ const cmd = Chat.getCommandManager()
     })
   )
   .or(0)
-  .literalArg("gstorage")
+  .literalArg("storage")
   .literalArg("declare")
   .blockPosArg("pos")
   .executes(JavaWrapper.methodToJavaAsync((ctx) => declareGoldStorage(ctx, true)))
   .or(2)
   .literalArg("renounce")
   .blockPosArg("pos")
+  /*
   .suggest(
     JavaWrapper.methodToJava((_, b) =>
       b.suggestMatching(
@@ -968,10 +1000,12 @@ const cmd = Chat.getCommandManager()
       )
     )
   )
+  */
   .executes(JavaWrapper.methodToJavaAsync((ctx) => renounceGoldStorage(ctx, true)))
   .or(2)
   .literalArg("nickname")
   .blockPosArg("pos")
+  /*
   .suggest(
     JavaWrapper.methodToJava((_, b) =>
       b.suggestMatching(
@@ -979,6 +1013,7 @@ const cmd = Chat.getCommandManager()
       )
     )
   )
+  */
   .wordArg("nickname")
   .executes(
     JavaWrapper.methodToJavaAsync((ctx) => {
