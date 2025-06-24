@@ -1,7 +1,11 @@
 {
-  "imports": {},
-  "tasks": {},
+  "imports": {
+    "hono": "npm:hono@^4.8.2"
+  },
   "compilerOptions": {
-    "lib": ["dom", "deno.ns", "deno.unstable"]
+    "lib": ["deno.unstable"]
+  },
+  "tasks": {
+    "dev": "deno run --allow-net --allow-read --allow-env --unstable-kv main.ts"
   }
 }

@@ -1,78 +1,63 @@
-import { serve } from "https://deno.land/std@0.224.0/http/mod.ts";
+import { Hono } from "hono";
+import { bearerAuth } from "hono/bearer-auth";
 import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 
 const env = config();
-const UPDATE_TOKEN = Deno.env.get("UPDATE_TOKEN") ?? env.UPDATE_TOKEN!;
-const WIPE_TOKEN = Deno.env.get("WIPE_TOKEN") ?? env.WIPE_TOKEN!;
+const UPDATE_TOKEN = Deno.env.get("UPDATE_TOKEN") ?? env.UPDATE_TOKEN;
+const WIPE_TOKEN = Deno.env.get("WIPE_TOKEN") ?? env.WIPE_TOKEN;
 const kv = await Deno.openKv();
 
-function validateToken(req: Request, token: string): boolean {
-  const auth = req.headers.get("Authorization");
-  const [scheme, providedToken] = auth?.split(" ") ?? [];
-  return scheme === "Bearer" && providedToken === token;
-}
+const app = new Hono();
 
-serve(async req => {
-  const { pathname } = new URL(req.url);
+app.use("/api/update", bearerAuth({ token: UPDATE_TOKEN }));
+app.use("/api/wipe", bearerAuth({ token: WIPE_TOKEN }));
 
-  if (pathname === "/api/update") {
-    if (req.method !== "POST")
-      return new Response("Invalid Method", { status: 405 });
-    if (!validateToken(req, UPDATE_TOKEN))
-      return new Response("Unauthorized", { status: 401 });
+app.post("/api/update", async c => {
+  const { serverIdentifier, data } = await c.req.json();
 
-    const { serverIdentifier, data } = await req.json();
+  if (
+    typeof serverIdentifier !== "string" ||
+    typeof data?.uuid !== "string" ||
+    typeof data?.goldCount !== "number"
+  )
+    return c.text("Bad request", 400);
 
-    if (
-      typeof serverIdentifier !== "string" ||
-      typeof data?.uuid !== "string" ||
-      typeof data?.goldCount !== "number"
-    ) {
-      return new Response("Bad Request", { status: 400 });
-    }
-
-    await kv.set(["records", serverIdentifier, data.uuid], data.goldCount);
-    return new Response("Updated", { status: 200 });
-  }
-
-  if (pathname === "/api/wipe") {
-    if (req.method !== "POST")
-      return new Response("Invalid Method", { status: 405 });
-    if (!validateToken(req, WIPE_TOKEN))
-      return new Response("Unauthorized", { status: 401 });
-
-    const { type, serverIdentifier, keys } = await req.json();
-
-    if (type === "all") {
-      const entries = kv.list({ prefix: ["records"] });
-      for await (const entry of entries) await kv.delete(entry.key);
-      return new Response("All records wiped", { status: 200 });
-    }
-
-    if (type === "multiple" && Array.isArray(keys)) {
-      const keysToDelete = keys.map((k) => ["records", serverIdentifier, k])
-      for (const k of keysToDelete) await kv.delete(k)
-      return new Response(`Keys: ${serverIdentifier}/${keys.join(",")} deleted`, { status: 200 });
-    }
-
-    return new Response("Bad Request", { status: 400 });
-  }
-
-  if (pathname === "/api/records") {
-    if (req.method !== "GET")
-      return new Response("Invalid Method", { status: 405 });
-
-    const entries = kv.list({ prefix: ["records"] });
-    const result: Record<string, Record<string, number>> = {};
-
-    for await (const entry of entries) {
-      const [, serverId, uuid] = entry.key as [string, string, string];
-      result[serverId] ??= {};
-      result[serverId][uuid] = entry.value as number;
-    }
-
-    return Response.json(result);
-  }
-
-  return new Response("Not Found", { status: 404 });
+  await kv.set(["records", serverIdentifier, data.uuid], data.goldCount);
+  return c.text("Updated");
 });
+
+app.post("/api/wipe", async c => {
+  const { type, serverIdentifier, keys } = await c.req.json();
+
+  if (typeof type !== "string") return c.text("Bad request", 400);
+
+  if (type === "all") {
+    const entries = kv.list({ prefix: ["records"] });
+    for await (const entry of entries) await kv.delete(entry.key);
+    return c.text("All records wiped");
+  }
+
+  if (type === "multiple") {
+    if (typeof serverIdentifier !== "string" || !Array.isArray(keys))
+      return c.text("Bad request", 400);
+
+    const paths = keys.map(key => ["records", serverIdentifier, key]);
+    for (const path of paths) await kv.delete(path);
+    return c.text("Keys deleted");
+  }
+});
+
+app.get("/api/records", async c => {
+  const records = kv.list({ prefix: ["records"] });
+  const result: Record<string, Record<string, number>> = {};
+
+  for await (const record of records) {
+    const [, serverIdentifier, id] = record.key as [string, string, string];
+    result[serverIdentifier] ??= {};
+    result[serverIdentifier][id] = record.value as number;
+  }
+
+  return c.json(result);
+});
+
+Deno.serve(app.fetch);

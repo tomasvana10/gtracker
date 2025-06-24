@@ -14,8 +14,8 @@ const extractPosFromKeyStringRegex = /\[C@(\d+,\d+,\d+)\]/;
 const DENO_API = "https://gtracker.deno.dev/api/";
 const UUID_API = "https://sessionserver.mojang.com/session/minecraft/profile/";
 
-const UPDATE_TOKEN = "";
-const WIPE_TOKEN = "";
+const UPDATE_TOKEN = "yTmxQAVbxi2jzRKt07gOWjeiFl7IvB9o";
+const WIPE_TOKEN = "FfFUUkIhl0y5qZaEiX1jI2x2To5fx4A6";
 
 // You can change this to whatever you like
 const GOLD_WEIGHTINGS = Object.fromEntries(
@@ -793,10 +793,13 @@ const breakStorageListener = JsMacros.on(
   })
 );
 
-const joinWorldListener = JsMacros.on("JoinServer", JavaWrapper.methodToJavaAsync(() => {
-  Time.sleep(1000);
-  check();
-}));
+const joinWorldListener = JsMacros.on(
+  "JoinServer",
+  JavaWrapper.methodToJavaAsync(() => {
+    Time.sleep(1000);
+    check();
+  })
+);
 
 const tickListener = JsMacros.on(
   "Tick",
