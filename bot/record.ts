@@ -8,7 +8,7 @@ export const compileGoldRecordEmbed = async (
   record: GoldRecord
 ) => {
   return <DiscordEmbed>{
-    title: `Gold records for ${serverIdentifier}`,
+    title: `Gold record for ${serverIdentifier}`,
     color: 0xba9e61,
     description: await formatGoldRecord(record),
     footer: {
