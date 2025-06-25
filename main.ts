@@ -1,16 +1,15 @@
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
-import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
-
-const env = config();
-const UPDATE_TOKEN = Deno.env.get("UPDATE_TOKEN") ?? env.UPDATE_TOKEN;
-const WIPE_TOKEN = Deno.env.get("WIPE_TOKEN") ?? env.WIPE_TOKEN;
-const kv = await Deno.openKv();
+import BOT from "./bot/index.ts";
+import envars from "./util/envars.ts";
+import { getRecords } from "./util/storage.ts";
+import kv from "./util/kv.ts";
+import DiscordChannelTracker from "./bot/tracker.ts";
 
 const app = new Hono();
 
-app.use("/api/update", bearerAuth({ token: UPDATE_TOKEN }));
-app.use("/api/wipe", bearerAuth({ token: WIPE_TOKEN }));
+app.use("/api/update", bearerAuth({ token: envars.UPDATE_TOKEN }));
+app.use("/api/wipe", bearerAuth({ token: envars.WIPE_TOKEN }));
 
 app.post("/api/update", async c => {
   const { serverIdentifier, data } = await c.req.json();
@@ -23,6 +22,10 @@ app.post("/api/update", async c => {
     return c.text("Bad request", 400);
 
   await kv.set(["records", serverIdentifier, data.uuid], data.goldCount);
+  await DiscordChannelTracker.update(
+    serverIdentifier,
+    await getRecords(kv).then(res => res[serverIdentifier])
+  );
   return c.text("Updated");
 });
 
@@ -34,30 +37,25 @@ app.post("/api/wipe", async c => {
   if (type === "all") {
     const entries = kv.list({ prefix: ["records"] });
     for await (const entry of entries) await kv.delete(entry.key);
-    return c.text("All records wiped");
-  }
-
-  if (type === "multiple") {
+    c.text("All records wiped");
+  } else if (type === "multiple") {
     if (typeof serverIdentifier !== "string" || !Array.isArray(keys))
       return c.text("Bad request", 400);
 
     const paths = keys.map(key => ["records", serverIdentifier, key]);
     for (const path of paths) await kv.delete(path);
-    return c.text("Keys deleted");
+    c.text("Keys deleted");
   }
+
+  await DiscordChannelTracker.update(
+    serverIdentifier,
+    await getRecords(kv).then(res => res[serverIdentifier])
+  );
 });
 
 app.get("/api/records", async c => {
-  const records = kv.list({ prefix: ["records"] });
-  const result: Record<string, Record<string, number>> = {};
-
-  for await (const record of records) {
-    const [, serverIdentifier, id] = record.key as [string, string, string];
-    result[serverIdentifier] ??= {};
-    result[serverIdentifier][id] = record.value as number;
-  }
-
-  return c.json(result);
+  return c.json(await getRecords(kv));
 });
 
 Deno.serve(app.fetch);
+await BOT.start();
