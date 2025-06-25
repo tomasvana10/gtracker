@@ -1,5 +1,7 @@
+import { ChannelTypes } from "npm:@discordeno/bot@19.0.0";
 import envars from "../util/envars.ts";
 import kv from "../util/kv.ts";
+import { sanitiseServerIdentifier } from "../util/misc.ts";
 import BOT from "./index.ts";
 
 type ChannelEntry = Record<"channelId" | "messageId", string>;
@@ -12,15 +14,16 @@ export default class DiscordChannelTracker {
 
   static async _kvAddChannel(
     serverIdentifier: string,
-    entry: ChannelEntry
+    channel: ChannelEntry
   ): Promise<void> {
-    await kv.set(["channels", serverIdentifier, "channelId"], entry.channelId);
-    await kv.set(["channels", serverIdentifier, "messageId"], entry.messageId);
+    await kv.set(["channels", serverIdentifier], channel);
   }
 
   static async _discordCreateChannel(name: string) {
     const res = await BOT.rest.createChannel(envars.DISCORD_GUILD_ID, {
-      name,
+      type: ChannelTypes.GuildText,
+      name: sanitiseServerIdentifier(name),
+      parentId: envars.DISCORD_CATEGORY_ID,
     });
     return res.id;
   }
@@ -30,8 +33,14 @@ export default class DiscordChannelTracker {
     return res.id;
   }
 
-  static async _discordSetMessage(entry: ChannelEntry, content: string) {
-    await BOT.rest.editMessage(entry.channelId, entry.messageId, { content });
+  static async _discordChannelExists(channel: ChannelEntry) {
+    return !!(await BOT.rest.getMessage(channel.channelId, channel.messageId));
+  }
+
+  static async _discordSetMessage(channel: ChannelEntry, content: string) {
+    await BOT.rest.editMessage(channel.channelId, channel.messageId, {
+      content,
+    });
   }
 
   static async _acquireChannelEntry(
@@ -40,8 +49,8 @@ export default class DiscordChannelTracker {
     const channel = await this._kvGetChannel(serverIdentifier);
     let channelId: string;
     let messageId: string;
-    
-    if (!channel) {
+
+    if (!channel || !(await this._discordChannelExists(channel))) {
       channelId = await this._discordCreateChannel(serverIdentifier);
       messageId = await this._discordCreateMessage(channelId);
       await this._kvAddChannel(serverIdentifier, { channelId, messageId });
@@ -57,8 +66,8 @@ export default class DiscordChannelTracker {
     serverIdentifier: string,
     data: { [key: string]: number }
   ) {
-    const entry = await this._acquireChannelEntry(serverIdentifier);
+    const channel = await this._acquireChannelEntry(serverIdentifier);
 
-    await this._discordSetMessage(entry, JSON.stringify(data));
+    await this._discordSetMessage(channel, JSON.stringify(data));
   }
 }

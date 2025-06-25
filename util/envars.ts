@@ -11,6 +11,7 @@ const vars = [
   "DISCORD_BOT_CLIENT_ID",
   "DISCORD_BOT_PUBLIC_KEY",
   "DISCORD_GUILD_ID",
+  "DISCORD_CATEGORY_ID",
 ] as const;
 
 const envars = <Record<(typeof vars)[number], string>>(
