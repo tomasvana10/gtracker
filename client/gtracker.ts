@@ -7,7 +7,7 @@
  * containers (which must be declared) are a separate entity.
  */
 
-const DEBUG = true;
+const DEBUG = false;
 
 const extractPosFromKeyStringRegex = /\[C@(\d+,\d+,\d+)\]/;
 

@@ -30,7 +30,7 @@ export const getMaxGoldRecordNameLength = (record: GoldRecord) =>
   Math.max(...Object.entries(record).map(entry => entry[0].length));
 
 export const formatGoldRecord = async (record: GoldRecord) => {
-  let msg = `Total gold count is ${getGoldRecordTotal(record)}`;
+  let msg = `Total gold count is **${getGoldRecordTotal(record)}**`;
   msg += "```txt\n";
   const max = getMaxGoldRecordNameLength(record) + 5;
 
