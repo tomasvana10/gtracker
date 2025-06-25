@@ -14,7 +14,7 @@ export default class DiscordChannelTracker {
     return res.value as ChannelEntry | undefined;
   }
 
-  static async _kvAddChannel(
+  static async _kvSetChannel(
     serverIdentifier: string,
     channel: ChannelEntry
   ): Promise<void> {
@@ -36,7 +36,21 @@ export default class DiscordChannelTracker {
   }
 
   static async _discordChannelExists(channel: ChannelEntry) {
-    return !!(await BOT.rest.getMessage(channel.channelId, channel.messageId));
+    try {
+      await BOT.rest.getChannel(channel.channelId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  static async _discordMessageExists(channel: ChannelEntry) {
+    try {
+      await BOT.rest.getMessage(channel.channelId, channel.messageId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   static async _discordSetMessage(
@@ -45,6 +59,7 @@ export default class DiscordChannelTracker {
     record: GoldRecord
   ) {
     await BOT.rest.editMessage(channel.channelId, channel.messageId, {
+      content: "",
       embeds: [await compileGoldRecordEmbed(serverIdentifier, record)],
     });
   }
@@ -59,10 +74,15 @@ export default class DiscordChannelTracker {
     if (!channel || !(await this._discordChannelExists(channel))) {
       channelId = await this._discordCreateChannel(serverIdentifier);
       messageId = await this._discordCreateMessage(channelId);
-      await this._kvAddChannel(serverIdentifier, { channelId, messageId });
+      await this._kvSetChannel(serverIdentifier, { channelId, messageId });
     } else {
       channelId = channel.channelId;
-      messageId = channel.messageId;
+      if (!(await this._discordMessageExists(channel))) {
+        messageId = await this._discordCreateMessage(channelId);
+        await this._kvSetChannel(serverIdentifier, { channelId, messageId });
+      } else {
+        messageId = channel.messageId;
+      }
     }
 
     return { channelId, messageId };
