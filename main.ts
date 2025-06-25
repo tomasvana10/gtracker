@@ -58,4 +58,5 @@ app.get("/api/records", async c => {
 });
 
 Deno.serve(app.fetch);
+
 await BOT.start();
