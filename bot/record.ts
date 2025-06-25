@@ -20,16 +20,13 @@ export const compileGoldRecordEmbed = async (
   };
 };
 
-export const sortGoldRecord = (record: GoldRecord) =>
+const sortGoldRecord = (record: GoldRecord) =>
   Object.fromEntries(Object.entries(record).sort((a, b) => b[1] - a[1]));
 
-export const getGoldRecordTotal = (record: GoldRecord) =>
+const getGoldRecordTotal = (record: GoldRecord) =>
   Object.entries(record).reduce((acc, val) => acc + val[1], 0);
 
-export const getMaxGoldRecordNameLength = (record: GoldRecord) =>
-  Math.max(...Object.entries(record).map(entry => entry[0].length));
-
-export const formatGoldRecordNames = async (record: GoldRecord) => {
+const formatGoldRecordEntries = async (record: GoldRecord) => {
   const entries: [string, string][] = [];
 
   for (const [name, val] of Object.entries(record)) {
@@ -42,15 +39,19 @@ export const formatGoldRecordNames = async (record: GoldRecord) => {
   return entries;
 };
 
-export const formatGoldRecord = async (record: GoldRecord) => {
-  const formattedNames = await formatGoldRecordNames(sortGoldRecord(record));
-  const max = Math.max(...formattedNames.map(([name]) => name.length)) + 5;
+const formatGoldRecord = async (record: GoldRecord) => {
+  const formattedEntries = await formatGoldRecordEntries(
+    sortGoldRecord(record)
+  );
+  const maxName =
+    Math.max(...formattedEntries.map(([name]) => name.length)) + 5;
+  const maxVal = Math.max(...formattedEntries.map(([, val]) => val.length));
 
   let msg = `Total gold count is **${getGoldRecordTotal(record)}**`;
   msg += "```txt\n";
 
-  for (const [name, val] of formattedNames) {
-    msg += name.padEnd(max, ".") + val + "\n";
+  for (const [name, val] of formattedEntries) {
+    msg += name.padEnd(maxName, ".") + val.padStart(maxVal, ".") + "\n";
   }
 
   msg += "```";
