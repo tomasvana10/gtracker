@@ -3,8 +3,10 @@ import envars from "../util/envars.ts";
 import kv from "../util/kv.ts";
 import { sanitiseServerIdentifier } from "../util/misc.ts";
 import BOT from "./index.ts";
+import { compileGoldRecordEmbed } from "./record.ts";
 
-type ChannelEntry = Record<"channelId" | "messageId", string>;
+export type ChannelEntry = Record<"channelId" | "messageId", string>;
+export type GoldRecord = Record<string, number>;
 
 export default class DiscordChannelTracker {
   static async _kvGetChannel(serverIdentifier: string) {
@@ -37,9 +39,13 @@ export default class DiscordChannelTracker {
     return !!(await BOT.rest.getMessage(channel.channelId, channel.messageId));
   }
 
-  static async _discordSetMessage(channel: ChannelEntry, content: string) {
+  static async _discordSetMessage(
+    channel: ChannelEntry,
+    serverIdentifier: string,
+    record: GoldRecord
+  ) {
     await BOT.rest.editMessage(channel.channelId, channel.messageId, {
-      content,
+      embeds: [await compileGoldRecordEmbed(serverIdentifier, record)],
     });
   }
 
@@ -62,12 +68,9 @@ export default class DiscordChannelTracker {
     return { channelId, messageId };
   }
 
-  static async update(
-    serverIdentifier: string,
-    data: { [key: string]: number }
-  ) {
+  static async update(serverIdentifier: string, record: GoldRecord) {
     const channel = await this._acquireChannelEntry(serverIdentifier);
 
-    await this._discordSetMessage(channel, JSON.stringify(data));
+    await this._discordSetMessage(channel, serverIdentifier, record);
   }
 }
