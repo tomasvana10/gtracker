@@ -29,18 +29,28 @@ export const getGoldRecordTotal = (record: GoldRecord) =>
 export const getMaxGoldRecordNameLength = (record: GoldRecord) =>
   Math.max(...Object.entries(record).map(entry => entry[0].length));
 
+export const formatGoldRecordNames = async (record: GoldRecord) => {
+  const entries: [string, string][] = [];
+
+  for (const [name, val] of Object.entries(record)) {
+    const formattedName = name.startsWith("[")
+      ? `(${keyStringToPos(name).join(", ")})`
+      : await InGameNameCache.get(name);
+    entries.push([formattedName, val.toString()]);
+  }
+
+  return entries;
+};
+
 export const formatGoldRecord = async (record: GoldRecord) => {
+  const formattedNames = await formatGoldRecordNames(sortGoldRecord(record));
+  const max = Math.max(...formattedNames.map(([name]) => name.length)) + 5;
+
   let msg = `Total gold count is **${getGoldRecordTotal(record)}**`;
   msg += "```txt\n";
-  const max = getMaxGoldRecordNameLength(record) + 5;
 
-  for (const [name, val] of Object.entries(sortGoldRecord(record))) {
-    if (name.startsWith("[")) {
-      msg += `(${keyStringToPos(name).join(", ")})`.padEnd(max, ".") + val;
-    } else {
-      msg += `${await InGameNameCache.get(name)}`.padEnd(max, ".") + val;
-    }
-    msg += "\n";
+  for (const [name, val] of formattedNames) {
+    msg += name.padEnd(max, ".") + val + "\n";
   }
 
   msg += "```";
