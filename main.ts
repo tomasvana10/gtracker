@@ -34,23 +34,26 @@ app.post("/api/wipe", async c => {
 
   if (typeof type !== "string") return c.text("Bad request", 400);
 
+  const updateDiscord = async () =>
+    await DiscordChannelTracker.update(
+      serverIdentifier,
+      await getRecords(kv).then(res => res[serverIdentifier])
+    );
+
   if (type === "all") {
     const entries = kv.list({ prefix: ["records"] });
     for await (const entry of entries) await kv.delete(entry.key);
-    c.text("All records wiped");
+    await updateDiscord();
+    return c.text("All records wiped");
   } else if (type === "multiple") {
     if (typeof serverIdentifier !== "string" || !Array.isArray(keys))
       return c.text("Bad request", 400);
 
     const paths = keys.map(key => ["records", serverIdentifier, key]);
     for (const path of paths) await kv.delete(path);
-    c.text("Keys deleted");
+    await updateDiscord();
+    return c.text("Keys deleted");
   }
-
-  await DiscordChannelTracker.update(
-    serverIdentifier,
-    await getRecords(kv).then(res => res[serverIdentifier])
-  );
 });
 
 app.get("/api/records", async c => {
