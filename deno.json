@@ -8,6 +8,7 @@
     "lib": ["deno.unstable", "dom"]
   },
   "tasks": {
-    "dev": "deno run --allow-net --allow-read --allow-env --unstable-kv --allow-sys main.ts"
+    "dev": "deno run --allow-net --allow-read --allow-env --unstable-kv --allow-sys main.ts",
+    "build": "deno compile --allow-net --allow-read --allow-env --unstable-kv --allow-sys --output=server main.ts"
   }
 }
